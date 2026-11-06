@@ -111,6 +111,11 @@ describe.runIf(process.platform === "linux")("seat environment from a daemon sta
       // A server the daemon started has none of the parent session's identity either.
       if (server === "daemon") expect(Object.keys(global).filter((k) => k in PARENT_SESSION)).toEqual([]);
 
+      // The daemon itself was started without the herdr-core terminal's scope, though `rig daemon start` had it:
+      // herdr-core reads the environment a process started with, which deleting from process.env doesn't change.
+      const health = await (await fetch(`${daemon.baseUrl}/healthz`)).json() as { pid: number };
+      expect(Object.keys(environOf(String(health.pid))).filter((k) => k.startsWith("HC_"))).toEqual([]);
+
       if (server === "existing") {
         // Owner state is untouched: the server's global environment and the
         // pre-existing session keep exactly what they had.

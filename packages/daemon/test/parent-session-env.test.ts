@@ -13,6 +13,9 @@ const CONFIGURATION = {
   CLAUDE_CODE_OAUTH_TOKEN: "t",
   CLAUDE_CODE_MAX_OUTPUT_TOKENS: "9",
   HERDR_SOCKET_PATH: "/h.sock",
+  // They select which herdr-core to talk to; only the terminal scope (HC_SCOPE, HC_TERMINAL_*) is removed.
+  HC_SESSION: "default",
+  HC_SOCKET: "/run/hc.sock",
 };
 
 describe("removeParentSessionEnv", () => {

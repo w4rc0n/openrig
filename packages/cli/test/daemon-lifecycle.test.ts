@@ -1539,6 +1539,13 @@ describe("buildDaemonEnv", () => {
     expect(result["CMUX_WORKSPACE_ID"]).toBe("workspace:1");
   });
 
+  it("never starts the daemon with the herdr-core terminal it is run from (core would end it with that terminal)", () => {
+    const result = buildDaemonEnv({ HOME: "/srv/tester", PATH: "/usr/bin", HC_SCOPE: "s-7", HC_TERMINAL_ID: "t7", HC_TERMINAL_SOCKET: "/run/hc.sock" },
+      { port: 7433, host: "127.0.0.1", db: "/tmp/test.db" });
+    expect([result["HC_SCOPE"], result["HC_TERMINAL_ID"], result["HC_TERMINAL_SOCKET"]]).toEqual([undefined, undefined, undefined]);
+    expect(result["HOME"]).toBe("/srv/tester");
+  });
+
   it("explicit opts override inherited OPENRIG_* from base env", () => {
     const baseEnv: Record<string, string> = {
       HOME: "/Users/tester",
