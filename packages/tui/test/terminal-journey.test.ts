@@ -85,7 +85,9 @@ describe("terminal browser → preview → explicit Open", () => {
     expect(detail).toContain("blank"); expect(detail).toContain("member-19"); expect(detail).toContain("Unavailable · missing"); expect(detail).toContain("remote-http");
     screen = draw(cols, rows);
     expect(screen.lines.join("\n")).toContain("Page 2/2");
-    expect(effects).toEqual([]); expect(requests.every(r => r.startsWith("GET /api/terminal/"))).toBe(true);
+    expect(effects).toEqual([]);
+    // Passive: terminal reads, plus the one config read that says whether terminal.provider selects herdr-app.
+    expect(requests.every(r => r.startsWith("GET /api/terminal/") || r === "GET /api/config/terminal.provider")).toBe(true);
     // Attention is a side trip: Help and Back must preserve this exact preview page.
     view.dispatch(parseCommand("attention"));
     view.dispatch({ type: "attention-open", id: "queue:fixture-request" });

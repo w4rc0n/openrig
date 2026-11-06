@@ -849,3 +849,77 @@ it("previews mission owners and ensure capability through the same scoped resolv
   expect(preview).toMatchObject({ task: { kind: "mission", id: "work", complete: true, members: [] }, capabilities: { ensureViewer: true } });
   expect("task" in preview && preview.task).not.toHaveProperty("qitemId");
 });
+
+describe("provider names and terminal.provider (herdr-legacy, herdr-app)", () => {
+  class AppProvider extends RecordingProvider {
+    closed: string[] = [];
+    constructor(readonly appHome: string) { super("herdr-app"); }
+    async closeView(viewId: string): Promise<OpenViewResult> { this.closed.push(viewId); return { provider: "herdr-app", ok: true, opened: [], absent: [], degraded: [], pages: 0 }; }
+  }
+  const withApp = (overrides: Partial<TerminalServiceDeps> = {}) => {
+    const apps = new Map<string, AppProvider>();
+    const made = makeDeps({
+      resolveHerdrAppProvider: (target) => {
+        const home = target.appHome ?? "/srv/apps/herdr-app";
+        if (!apps.has(home)) apps.set(home, new AppProvider(home));
+        return apps.get(home)!;
+      },
+      ...overrides,
+    });
+    return { ...made, apps, svc: new TerminalService(made.deps) };
+  };
+
+  it("herdr-legacy names the same herdr provider", async () => {
+    const { svc, herdr } = withApp();
+    const result = await svc.openView({ view: "acme-build", provider: "herdr-legacy" });
+    expect(result.ok).toBe(true);
+    expect(herdr.lastView).not.toBeNull();
+  });
+
+  it("an omitted provider follows terminal.provider; auto keeps herdr, then cmux; a named provider always wins", async () => {
+    const configured = { value: "herdr-app" };
+    const { svc, apps, herdr } = withApp({ configuredProvider: () => configured.value });
+    await svc.openView({ view: "acme-build" });
+    expect([...apps.values()][0]!.lastView).not.toBeNull();
+    expect(herdr.lastView).toBeNull();
+    await svc.openView({ view: "acme-build", provider: "herdr" });
+    expect(herdr.lastView).not.toBeNull();
+    configured.value = "auto";
+    herdr.lastView = null;
+    await svc.openView({ view: "acme-build" });
+    expect(herdr.lastView).not.toBeNull();
+  });
+
+  it("herdr-app is one provider per client: the open goes to the named app home, and plans differ per client", async () => {
+    const { svc, apps } = withApp();
+    const a = await svc.previewView({ view: "acme-build", provider: "herdr-app", herdrApp: { appHome: "/a" } }) as { planId: string };
+    const b = await svc.previewView({ view: "acme-build", provider: "herdr-app", herdrApp: { appHome: "/b" } }) as { planId: string };
+    expect(a.planId).not.toBe(b.planId);
+    const opened = await svc.openView({ view: "acme-build", provider: "herdr-app", herdrApp: { appHome: "/a" }, expectedPlan: a.planId });
+    expect(opened.ok).toBe(true);
+    expect(apps.get("/a")!.lastView).not.toBeNull();
+    expect(apps.get("/b")!.lastView).toBeNull();
+    expect((await svc.openView({ view: "acme-build", provider: "herdr-app", herdrApp: { appHome: "/b" }, expectedPlan: a.planId })).code).toBe("preview_changed");
+  });
+
+  it("a failed herdr-app open gives no attach-by-hand recipe", async () => {
+    const { svc, apps } = withApp();
+    svc["deps"].resolveHerdrAppProvider!({ appHome: "/a" });
+    apps.get("/a")!.openView = async () => ({ provider: "herdr-app", ok: false, opened: [], absent: [], degraded: [], pages: 0, error: "herdr-app is not answering", code: "herdr_app_unavailable" });
+    const result = await svc.openView({ view: "acme-build", provider: "herdr-app", herdrApp: { appHome: "/a" } });
+    expect(result.code).toBe("herdr_app_unavailable");
+    expect(JSON.stringify(result.notes ?? [])).not.toMatch(/attach directly|env -u TMUX/);
+  });
+
+  it("closes only herdr-app Rig views, in the named client", async () => {
+    const { svc, apps } = withApp();
+    expect((await svc.closeView({ provider: "herdr-app", view: "rv-1", herdrApp: { appHome: "/a" } })).ok).toBe(true);
+    expect(apps.get("/a")!.closed).toEqual(["rv-1"]);
+    expect((await svc.closeView({ provider: "herdr", view: "x" })).code).toBe("close_unsupported");
+  });
+
+  it("without a herdr-app provider, says so", async () => {
+    const svc = new TerminalService(makeDeps().deps);
+    expect((await svc.openView({ view: "acme-build", provider: "herdr-app" })).code).toBe("herdr_app_unsupported");
+  });
+});

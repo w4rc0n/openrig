@@ -99,6 +99,16 @@ describe("SettingsStore (User Settings v0)", () => {
     expect(() => store.set("terminal.tmux_server", "isolate")).toThrow('must be "inherit" or "isolated"');
   });
 
+  it("terminal.provider: auto by default, a named provider, env override, invalid rejected", () => {
+    const store = new SettingsStore(configPath);
+    expect(store.resolveOne("terminal.provider")).toMatchObject({ value: "auto", source: "default" });
+    store.set("terminal.provider", "herdr-app");
+    expect(store.resolveOne("terminal.provider")).toMatchObject({ value: "herdr-app", source: "file" });
+    process.env.OPENRIG_TERMINAL_PROVIDER = "herdr";
+    try { expect(store.resolveOne("terminal.provider")).toMatchObject({ value: "herdr", source: "env" }); } finally { delete process.env.OPENRIG_TERMINAL_PROVIDER; }
+    expect(() => store.set("terminal.provider", "kitty")).toThrow("must be auto, herdr, herdr-legacy, herdr-app, cmux or rex");
+  });
+
   it("SETTINGS_VALID_KEYS matches the documented settings key set", () => {
     expect([...SETTINGS_VALID_KEYS]).toEqual([
       "daemon.port", "daemon.host", "daemon.db_conflict",
@@ -168,6 +178,7 @@ describe("SettingsStore (User Settings v0)", () => {
       // OPR.0.4.6.02 S1 — inner-tmux status-bar launch default (static bool).
       "terminal.status_bar",
       "terminal.tmux_server",
+      "terminal.provider",
       "terminal.history_limit",
       "terminal.inherit_tmux_environment",
       // Slice 15 (OPR.0.7.0.15) — compact command-output defaults switch.

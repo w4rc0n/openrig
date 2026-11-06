@@ -63,8 +63,11 @@ import type {
   ViewDescriptor,
 } from "./terminal-provider.js";
 
-/** The provider name set (herdr = proof-gated primary; cmux = best-effort; rex = by name or from a Rex caller). */
-export type TerminalProviderName = "herdr" | "cmux" | "rex";
+/** The provider name set (herdr = proof-gated primary; cmux = best-effort; rex = by name or from a Rex caller;
+ *  herdr-app = Rig-layout views in a herdr-app client, by name or config only). `herdr-legacy` names `herdr`. */
+export type TerminalProviderName = "herdr" | "cmux" | "rex" | "herdr-app";
+/** Names accepted for the same provider. */
+const PROVIDER_ALIASES: Readonly<Record<string, string>> = { "herdr-legacy": "herdr" };
 export const DEFAULT_PROVIDER: TerminalProviderName = "herdr";
 /** The order an omitted provider is chosen in: herdr if it's there, otherwise cmux. Rex is never chosen here. */
 const DEFAULT_PROVIDER_ORDER: readonly TerminalProviderName[] = ["herdr", "cmux"];
@@ -80,7 +83,11 @@ export interface OpenViewRequest {
   expectedPlan?: string;
   /** Measured width of the viewing terminal; unknown widths keep the narrow default. */
   viewportColumns?: number;
+  /** The herdr-app client (its app home) for provider herdr-app, and the core terminal the request came from. */
+  herdrApp?: HerdrAppTarget;
 }
+
+export interface HerdrAppTarget { appHome?: string; originTerminal?: string }
 
 export interface TerminalPreview {
   provider: string;
@@ -129,6 +136,10 @@ export interface TerminalServiceDeps {
   resolveProvider(name: string): TerminalProvider | null;
   /** Resolve an explicit session without altering the default provider instance. */
   resolveSessionProvider?(name: string, session: string): TerminalProvider | null;
+  /** The herdr-app provider for one client (app home); null when this daemon can't serve herdr-app. */
+  resolveHerdrAppProvider?(target: HerdrAppTarget): (TerminalProvider & { closeView(viewId: string): Promise<OpenViewResult>; appHome: string }) | null;
+  /** `terminal.provider` ("auto" or a provider name): used when a request names no provider. */
+  configuredProvider?(): string;
   /** The saved-views store (read paths only from this service). */
   viewsStore: Pick<TerminalViewsStore, "get" | "list">;
   /** Live seats of a rig BY NAME; null when no such rig is known (vs [] = a known-but-empty rig). */
@@ -240,12 +251,19 @@ export class TerminalService {
       ...(composed?.task ? { task: composed.task } : {}), viewDescriptor: { kind: controls.enabled && result.following?.enabled !== false ? "following" : "fixed", name: composed?.task?.name ?? selector.view } };
   }
 
-  private selectProvider(req: Pick<OpenViewRequest, "provider" | "session">): {
+  private selectProvider(req: Pick<OpenViewRequest, "provider" | "session" | "herdrApp">): {
     name: string; provider: TerminalProvider; session?: string;
   } | OpenViewResult {
-    const name = (req.provider ?? DEFAULT_PROVIDER).trim() || DEFAULT_PROVIDER;
+    const named = (req.provider ?? DEFAULT_PROVIDER).trim() || DEFAULT_PROVIDER;
+    const name = PROVIDER_ALIASES[named] ?? named;
+    if (name === "herdr-app") {
+      if (req.session !== undefined) return errorResult(name, "unsupported_terminal_session", "herdr-app selects its client by app home, not by session.");
+      const provider = this.deps.resolveHerdrAppProvider?.(req.herdrApp ?? {});
+      return provider ? { name, provider, session: provider.appHome }
+        : errorResult(name, "herdr_app_unsupported", "This daemon has no herdr-app provider.");
+    }
     const defaultProvider = this.deps.resolveProvider(name);
-    if (!defaultProvider) return errorResult(name, "unknown_provider", `unknown provider '${name}' — expected herdr, cmux or rex`);
+    if (!defaultProvider) return errorResult(name, "unknown_provider", `unknown provider '${name}' — expected herdr, herdr-legacy, herdr-app, cmux or rex`);
     if (req.session === undefined) return { name, provider: defaultProvider };
     const session = typeof req.session === "string" ? req.session.trim() : "";
     if (!session || session === "." || session === ".." || /[\\/\x00-\x1f\x7f]/.test(session)) {
@@ -275,6 +293,9 @@ export class TerminalService {
   private async providerNameFor(req: OpenViewRequest): Promise<{ name: string; fellBack: boolean }> {
     const named = req.provider?.trim();
     if (named || req.session !== undefined) return { name: named || DEFAULT_PROVIDER, fellBack: false };
+    // `terminal.provider` names one; "auto" (the default) keeps the order below unchanged.
+    const configured = this.deps.configuredProvider?.().trim();
+    if (configured && configured !== "auto") return { name: configured, fellBack: false };
     for (const name of DEFAULT_PROVIDER_ORDER) {
       const candidate = this.deps.resolveProvider(name);
       if (!candidate) continue;
@@ -311,7 +332,8 @@ export class TerminalService {
       };
     }
     const result = await provider.openView({ ...composed, planId });
-    if (result.opened.length === 0 && composed.opened.length > 0) {
+    // herdr-app opens in the client the request came from: its failure says why, never "attach by hand elsewhere".
+    if (result.opened.length === 0 && composed.opened.length > 0 && providerName !== "herdr-app") {
       notes.push("In a new terminal on the daemon's host, attach directly using one of these commands:");
       for (const pane of composed.opened) notes.push(`${pane.label}: env -u TMUX ${pane.recoveryCommand ?? pane.paneCommand}`);
       notes.push("Each labelled command above opens a different seat. When sharing how to join this team, include every command in full, unchanged, including env -u TMUX, paths and quoting.");
@@ -411,6 +433,17 @@ export class TerminalService {
     });
   }
 
+  /** Close one herdr-app Rig view: its cells leave the client's layout first, then only its own verified viewers end.
+   *  Seats are never touched. Other providers have no close. */
+  async closeView(req: { provider?: string; view: string; herdrApp?: HerdrAppTarget }): Promise<OpenViewResult> {
+    const name = PROVIDER_ALIASES[req.provider?.trim() ?? ""] ?? req.provider?.trim() ?? "herdr-app";
+    if (name !== "herdr-app") return errorResult(name, "close_unsupported", "Only herdr-app Rig views are closed by OpenRig; close other provider tabs in that provider.");
+    const provider = this.deps.resolveHerdrAppProvider?.(req.herdrApp ?? {});
+    if (!provider) return errorResult(name, "herdr_app_unsupported", "This daemon has no herdr-app provider.");
+    if (!req.view.trim()) return errorResult(name, "view_required", "Name the Rig view to close (rv-…).");
+    return provider.closeView(req.view.trim());
+  }
+
   /** List saved views + the rig names openable as derived views. */
   async listViews(detail = false): Promise<ListViewsResult> {
     const result: ListViewsResult = {
@@ -444,15 +477,21 @@ export class TerminalService {
   }
 
   /** Provider availability + liveness (doctor). Unknown named provider → empty report for it. */
-  async status(providerName?: string, session?: string): Promise<TerminalStatusResult> {
+  async status(providerName?: string, session?: string, herdrApp?: HerdrAppTarget): Promise<TerminalStatusResult> {
     const tmux = daemonTmuxServerInfo();
+    if ((PROVIDER_ALIASES[providerName ?? ""] ?? providerName) === "herdr-app") {
+      const selected = this.selectProvider({ provider: "herdr-app", ...(herdrApp ? { herdrApp } : {}) });
+      if ("ok" in selected) return { providers: [], error: selected.error, code: selected.code };
+      return { ...(tmux ? { tmux } : {}), session: selected.session, providers: [{ name: selected.name,
+        status: await selected.provider.status(), liveness: await selected.provider.liveness() }] };
+    }
     if (session !== undefined) {
       const selected = this.selectProvider({ provider: providerName, session });
       if ("ok" in selected) return { providers: [], error: selected.error, code: selected.code };
       return { following: this.following?.list() ?? [], session: selected.session, ...(tmux ? { tmux } : {}), providers: [{ name: selected.name,
         status: await selected.provider.status(), liveness: await selected.provider.liveness() }] };
     }
-    const names: string[] = providerName ? [providerName] : ["herdr", "cmux", "rex"];
+    const names: string[] = providerName ? [PROVIDER_ALIASES[providerName] ?? providerName] : ["herdr", "cmux", "rex"];
     // Checked side by side, so a slow provider never delays the others.
     const providers = await Promise.all(names.map(async (name): Promise<ProviderStatusReport> => {
       const p = this.deps.resolveProvider(name);

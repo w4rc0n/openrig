@@ -452,7 +452,7 @@ async function run(): Promise<void> {
         view.dispatch({ type: "notice", message: `Opening terminals for ${action.view}…` });
         draw();
         const result = await openTerminalInWindow(action.view, client.baseUrl, cliEntry, action.expectedPlan,
-          () => view.dispatch({ type: "terminal-preview", view: action.view }));
+          () => view.dispatch({ type: "terminal-preview", view: action.view }), undefined, () => client.configValue("terminal.provider"));
         const message = terminalWindowNotice(action.view, result);
         view.dispatch({ type: "terminal-result", view: action.view, message });
         view.dispatch({ type: "notice", message });
